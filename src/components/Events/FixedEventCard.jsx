@@ -1,14 +1,11 @@
-import React from 'react';
+import React from "react"
 
-const FixedEventCard = ({ event }) => {
+export default function FixedEventCard({ evt, onView }) {
   return (
-    <div className="fixed-event-card">
-      <div className="event-title">{event.title}</div>
-      <div className="event-meta" style={{opacity: 0.9}}>
-        {event.time}
+    <div className="fixed-card" onClick={() => onView && onView(evt)}>
+      <div style={{ fontWeight: 700 }}>
+        {new Date(evt.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - {evt.description || "Fixed"}
       </div>
     </div>
-  );
-};
-
-export default FixedEventCard;
+  )
+}

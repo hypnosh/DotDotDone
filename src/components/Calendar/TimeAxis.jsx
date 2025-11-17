@@ -1,31 +1,36 @@
-import React from 'react';
-import FixedEventCard from '../Events/FixedEventCard';
+import React from "react"
+import { useCalendarStore } from "../../state/calendarStore"
+import { useEventsStore } from "../../state/eventsStore"
+import { minutesBetween } from "../../utils/date"
 
-const TimeAxis = () => {
-  const hours = Array.from({ length: 24 }, (_, i) => i);
-  const sampleEvents = [
-    { time: '9:00 AM', title: 'Team Standup', hour: 9 },
-    { time: '2:00 PM', title: 'Client Meeting', hour: 14 },
-    { time: '4:30 PM', title: 'Project Review', hour: 16 }
-  ];
+export default function TimeAxis() {
+  const date = useCalendarStore(s => s.selectedDate)
+  const fixed = useEventsStore(s => s.getFixedEventsForDate(date))
+  // show timeline from 6am to 20pm
+  const hours = Array.from({ length: 15 }).map((_, i) => 6 + i)
 
   return (
-    <div className="timeline-container">
-      <div className="timeline">
-        {hours.map((hour) => {
-          const event = sampleEvents.find(e => e.hour === hour);
-          return (
-            <div key={hour} className="time-slot">
-              <span className="time-label">
-                {hour === 0 ? '12 AM' : hour < 12 ? `${hour} AM` : hour === 12 ? '12 PM' : `${hour - 12} PM`}
-              </span>
-              {event && <FixedEventCard event={event} />}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-};
+    <div className="card" style={{ minHeight: 600 }}>
+      {hours.map(h => (
+        <div key={h} style={{ marginBottom: 12 }}>
+          <div className="section-title">{h}:00</div>
 
-export default TimeAxis;
+          {/* render events that overlap this hour */}
+          {fixed.filter(evt => {
+            const evtHour = new Date(evt.start).getHours()
+            return evtHour === h || (new Date(evt.start).getHours() < h && new Date(evt.end).getHours() >= h)
+          }).map(evt => (
+            <div key={evt.id} className="fixed-card">
+              <div style={{ fontWeight: 600 }}>
+                {new Date(evt.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                {" - "}
+                {new Date(evt.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </div>
+              <div style={{ fontSize: 13 }}>{evt.description || "Fixed event"}</div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
