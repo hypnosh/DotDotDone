@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addSession,
   exportSessionsToCSV,
@@ -12,8 +12,25 @@ export const Route = createFileRoute("/")({
 });
 
 const DURATIONS = [15, 25, 45, 60];
+const CONTINUE_EXTENSION_MIN = 10;
 
-type Status = "idle" | "running" | "paused" | "complete";
+type Status = "idle" | "running" | "paused" | "awaiting" | "complete";
+
+function safeUUID() {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch {
+    /* fall through */
+  }
+  // RFC4122-ish fallback for non-secure contexts (http:// on LAN, etc.)
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 function formatClock(totalSeconds: number) {
   const s = Math.max(0, Math.floor(totalSeconds));
@@ -27,100 +44,338 @@ function formatDate(iso: string) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function formatAgo(ms: number) {
+  const totalMin = Math.max(0, Math.round(ms / 60000));
+  if (totalMin < 1) return "less than a minute ago";
+  if (totalMin === 1) return "1 minute ago";
+  if (totalMin < 60) return `${totalMin} minutes ago`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m === 0 ? `${h}h ago` : `${h}h ${m}m ago`;
+}
+
+// --- Fallback signals (work even when Notification API is blocked, e.g. iframe) ---
+function beep() {
+  if (typeof window === "undefined") return;
+  try {
+    const AC =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const play = (freq: number, start: number, dur: number) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + start + dur);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur + 0.05);
+    };
+    play(880, 0, 0.25);
+    play(1175, 0.3, 0.25);
+    play(880, 0.6, 0.4);
+    setTimeout(() => ctx.close().catch(() => {}), 1500);
+  } catch {
+    /* noop */
+  }
+}
+
+let titleFlashTimer: ReturnType<typeof setInterval> | null = null;
+function startTitleFlash() {
+  if (typeof document === "undefined") return;
+  stopTitleFlash();
+  const original = document.title;
+  let on = true;
+  titleFlashTimer = setInterval(() => {
+    document.title = on ? "⏰ Timer complete — DotDotDone" : original;
+    on = !on;
+  }, 900);
+  // Restore on first focus
+  const restore = () => {
+    stopTitleFlash();
+    document.title = original;
+    window.removeEventListener("focus", restore);
+  };
+  window.addEventListener("focus", restore);
+}
+function stopTitleFlash() {
+  if (titleFlashTimer) {
+    clearInterval(titleFlashTimer);
+    titleFlashTimer = null;
+  }
+}
+
 function Index() {
   const [intendedMinutes, setIntendedMinutes] = useState(25);
   const [label, setLabel] = useState("");
   const [status, setStatus] = useState<Status>("idle");
-  const [elapsed, setElapsed] = useState(0); // seconds of actual focus
   const [sessions, setSessions] = useState<FocusSession[]>([]);
   const [lastCompletion, setLastCompletion] = useState<FocusSession | null>(
     null,
   );
+  const [showReturnModal, setShowReturnModal] = useState(false);
+  const [nowTick, setNowTick] = useState(Date.now());
+  const [permissionState, setPermissionState] = useState<NotificationPermission | "unsupported">(
+    typeof window !== "undefined" && "Notification" in window
+      ? Notification.permission
+      : "unsupported",
+  );
 
-  const startedAtRef = useRef<string | null>(null);
-  const tickRef = useRef<number | null>(null);
+  // Timestamp-based deadline model (robust across pause/continue/awaiting).
+  const startedAtRef = useRef<number | null>(null);     // real start time ms
+  const deadlineAtRef = useRef<number | null>(null);    // when remaining hits 0
+  const timerEndedAtRef = useRef<number | null>(null);  // when status entered awaiting
+  const pausedRemainingRef = useRef<number | null>(null); // ms remaining when paused
+  const notificationRef = useRef<Notification | null>(null);
 
   useEffect(() => {
     setSessions(loadSessions());
   }, []);
 
-  // Timer tick — only when running
+  // Keep ticking once per second so derived UI (remaining, "ago") updates.
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const ensureNotificationPermission = useCallback(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    // Always try requestPermission synchronously inside the user gesture.
+    // If already granted/denied, browsers resolve immediately without prompting.
+    try {
+      const maybePromise = Notification.requestPermission((res) => {
+        setPermissionState(res);
+      });
+      if (maybePromise && typeof (maybePromise as Promise<NotificationPermission>).then === "function") {
+        (maybePromise as Promise<NotificationPermission>)
+          .then((res) => setPermissionState(res))
+          .catch(() => {});
+      }
+    } catch {
+      setPermissionState(Notification.permission);
+    }
+  }, []);
+
+  // Re-sync permission when the tab regains focus (user may have changed it in site settings).
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    const sync = () => setPermissionState(Notification.permission);
+    window.addEventListener("focus", sync);
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      window.removeEventListener("focus", sync);
+      document.removeEventListener("visibilitychange", sync);
+    };
+  }, []);
+
+  const fireCompletionSignals = useCallback(() => {
+    // Always: audible + title flash (work in any tab state where JS runs).
+    beep();
+    startTitleFlash();
+    // Optional: system notification, if permission granted.
+    if (typeof window !== "undefined" && "Notification" in window) {
+      if (Notification.permission === "granted") {
+        try {
+          notificationRef.current?.close();
+          const n = new Notification("Focus session complete", {
+            body: "Tap to choose: End & Log, or Continue.",
+            tag: "dotdotdone-complete",
+            requireInteraction: true,
+          });
+          n.onclick = () => {
+            window.focus();
+            n.close();
+          };
+          notificationRef.current = n;
+        } catch {
+          /* noop */
+        }
+      }
+    }
+  }, []);
+
+  // Watch for deadline crossing while running.
   useEffect(() => {
     if (status !== "running") return;
-    const total = intendedMinutes * 60;
-    const id = window.setInterval(() => {
-      setElapsed((prev) => {
-        const next = prev + 1;
-        if (next >= total) {
-          window.clearInterval(id);
-          finalize(total, total);
-          return total;
+    if (deadlineAtRef.current == null) return;
+    if (nowTick >= deadlineAtRef.current) {
+      timerEndedAtRef.current = deadlineAtRef.current;
+      setStatus("awaiting");
+      fireCompletionSignals();
+    }
+  }, [status, nowTick, fireCompletionSignals]);
+
+  // When tab becomes visible during awaiting state, surface the return modal.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onVis = () => {
+      if (document.visibilityState === "visible" && status === "awaiting") {
+        if (
+          timerEndedAtRef.current &&
+          Date.now() - timerEndedAtRef.current > 5000
+        ) {
+          setShowReturnModal(true);
         }
-        return next;
-      });
-    }, 1000);
-    tickRef.current = id;
-    return () => window.clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, intendedMinutes]);
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [status]);
 
   function start() {
-    if (status === "idle" || status === "complete") {
-      setElapsed(0);
-      setLastCompletion(null);
-      startedAtRef.current = new Date().toISOString();
-    }
+    // Request permission FIRST, synchronously in the gesture (Safari/FF).
+    ensureNotificationPermission();
+    // Fresh session
+    const now = Date.now();
+    startedAtRef.current = now;
+    deadlineAtRef.current = now + intendedMinutes * 60_000;
+    pausedRemainingRef.current = null;
+    timerEndedAtRef.current = null;
+    setLastCompletion(null);
     setStatus("running");
   }
 
   function pause() {
+    if (deadlineAtRef.current == null) return;
+    pausedRemainingRef.current = Math.max(0, deadlineAtRef.current - Date.now());
     setStatus("paused");
   }
 
-  function end() {
-    const total = intendedMinutes * 60;
-    finalize(elapsed, total);
+  function resume() {
+    if (pausedRemainingRef.current == null) return;
+    deadlineAtRef.current = Date.now() + pausedRemainingRef.current;
+    pausedRemainingRef.current = null;
+    setStatus("running");
   }
 
-  function finalize(actualSeconds: number, totalSeconds: number) {
-    if (tickRef.current) window.clearInterval(tickRef.current);
-    const startedAt = startedAtRef.current ?? new Date().toISOString();
-    const actualMinutes = Math.max(0, Math.round(actualSeconds / 60));
-    const intended = Math.round(totalSeconds / 60);
-    const completionPercent =
-      intended > 0
-        ? Math.min(100, Math.round((actualSeconds / totalSeconds) * 100))
-        : 0;
+  function endNowFromRunning() {
+    // User chose to end before the timer completed.
+    const elapsedMs =
+      startedAtRef.current != null ? Date.now() - startedAtRef.current : 0;
+    const plannedMs = intendedMinutes * 60_000;
+    finalize(elapsedMs, plannedMs, new Date().toISOString());
+  }
 
-    const session: FocusSession = {
-      id: crypto.randomUUID(),
-      label: label.trim() || undefined,
-      startedAt,
-      endedAt: new Date().toISOString(),
-      intendedMinutes: intended,
-      actualMinutes,
-      completionPercent,
-    };
+  function finalize(actualMs: number, plannedMs: number, endedAtIso: string) {
+    try {
+      stopTitleFlash();
+      notificationRef.current?.close();
+      notificationRef.current = null;
 
-    const all = addSession(session);
-    setSessions(all);
-    setLastCompletion(session);
-    setStatus("complete");
-    setElapsed(0);
-    startedAtRef.current = null;
+      const startedAtIso = startedAtRef.current
+        ? new Date(startedAtRef.current).toISOString()
+        : new Date().toISOString();
+      const actualMinutes = Math.max(0, Math.round(actualMs / 60_000));
+      const intended = Math.max(1, Math.round(plannedMs / 60_000));
+      const completionPercent =
+        plannedMs > 0
+          ? Math.min(100, Math.round((actualMs / plannedMs) * 100))
+          : 0;
+
+      const session: FocusSession = {
+        id: safeUUID(),
+        label: label.trim() || undefined,
+        startedAt: startedAtIso,
+        endedAt: endedAtIso,
+        intendedMinutes: intended,
+        actualMinutes,
+        completionPercent,
+      };
+
+      const all = addSession(session);
+      setSessions(all);
+      setLastCompletion(session);
+
+      // Reset transient state
+      startedAtRef.current = null;
+      deadlineAtRef.current = null;
+      pausedRemainingRef.current = null;
+      timerEndedAtRef.current = null;
+      setShowReturnModal(false);
+      setStatus("complete");
+    } catch (err) {
+      // Surface the error instead of silently failing — this is the
+      // category of bug that breaks "End Session" with no visible feedback.
+      console.error("[DotDotDone] Failed to log session:", err);
+      alert(
+        "Could not log session: " +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  }
+
+  // PRD: End & Log Then — logs the originally planned duration at timer-completion timestamp.
+  function endAndLogPlanned() {
+    const plannedMs = intendedMinutes * 60_000;
+    const endedAt = timerEndedAtRef.current ?? Date.now();
+    finalize(plannedMs, plannedMs, new Date(endedAt).toISOString());
+  }
+
+  // PRD: End & Log Now — logs all elapsed real time since start.
+  function endAndLogNow() {
+    const startedAt = startedAtRef.current ?? Date.now();
+    const elapsedMs = Math.max(0, Date.now() - startedAt);
+    const plannedMs = intendedMinutes * 60_000;
+    finalize(
+      elapsedMs,
+      Math.max(plannedMs, elapsedMs),
+      new Date().toISOString(),
+    );
+  }
+
+  // PRD: Continue — extend the session by N minutes and resume.
+  function continueSession(extensionMin = CONTINUE_EXTENSION_MIN) {
+    stopTitleFlash();
+    notificationRef.current?.close();
+    notificationRef.current = null;
+    setShowReturnModal(false);
+
+    const extMs = extensionMin * 60_000;
+    // Extend planned duration (so completion math + "Log Then" reflect it).
+    setIntendedMinutes((m) => m + extensionMin);
+    // New deadline = now + extension. Keeps "remaining" exactly equal to extension.
+    deadlineAtRef.current = Date.now() + extMs;
+    timerEndedAtRef.current = null;
+    pausedRemainingRef.current = null;
+    setStatus("running");
   }
 
   function reset() {
-    if (tickRef.current) window.clearInterval(tickRef.current);
-    setStatus("idle");
-    setElapsed(0);
-    setLastCompletion(null);
+    stopTitleFlash();
+    notificationRef.current?.close();
+    notificationRef.current = null;
     startedAtRef.current = null;
+    deadlineAtRef.current = null;
+    pausedRemainingRef.current = null;
+    timerEndedAtRef.current = null;
+    setShowReturnModal(false);
+    setLastCompletion(null);
+    setStatus("idle");
   }
 
-  const totalSeconds = intendedMinutes * 60;
-  const remaining = Math.max(0, totalSeconds - elapsed);
-  const progress = totalSeconds > 0 ? elapsed / totalSeconds : 0;
+  // Derive remaining seconds from refs + nowTick
+  const plannedSeconds = intendedMinutes * 60;
+  let remainingSec: number;
+  if (status === "idle" || status === "complete") {
+    remainingSec = plannedSeconds;
+  } else if (status === "paused") {
+    remainingSec = Math.ceil((pausedRemainingRef.current ?? 0) / 1000);
+  } else if (status === "awaiting") {
+    remainingSec = 0;
+  } else {
+    // running
+    const ms = (deadlineAtRef.current ?? Date.now()) - nowTick;
+    remainingSec = Math.max(0, Math.ceil(ms / 1000));
+  }
+  const progress =
+    plannedSeconds > 0
+      ? Math.min(1, Math.max(0, 1 - remainingSec / plannedSeconds))
+      : 0;
 
   const weeklyMinutes = useMemo(() => {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -130,6 +385,9 @@ function Index() {
   }, [sessions]);
 
   const lastBanner = lastCompletion ?? sessions[0] ?? null;
+  const sinceEndedMs = timerEndedAtRef.current
+    ? nowTick - timerEndedAtRef.current
+    : 0;
 
   return (
     <div className="min-h-screen bg-background text-foreground selection:bg-primary/20">
@@ -166,16 +424,19 @@ function Index() {
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               placeholder="What are we focusing on?"
-              disabled={status === "running"}
+              disabled={status === "running" || status === "awaiting"}
               className="bg-transparent border-none text-center text-muted-foreground placeholder:text-muted-foreground/40 focus:outline-none text-xl font-normal w-full max-w-md mb-8 disabled:opacity-60"
             />
 
             <div className="relative flex flex-col items-center">
               <div className="text-[110px] sm:text-[140px] md:text-[200px] font-extrabold tracking-tighter leading-none select-none tabular-nums">
-                {formatClock(status === "idle" ? totalSeconds : remaining)}
+                {formatClock(remainingSec)}
               </div>
               {status === "running" && (
                 <div className="absolute -inset-4 rounded-full border border-primary/20 animate-breathe pointer-events-none" />
+              )}
+              {status === "awaiting" && (
+                <div className="absolute -inset-4 rounded-full border border-primary/40 animate-pulse pointer-events-none" />
               )}
             </div>
 
@@ -183,7 +444,9 @@ function Index() {
             <div className="mx-auto mt-8 w-full max-w-md h-1 bg-border rounded-full overflow-hidden">
               <div
                 className="h-full bg-primary transition-[width] duration-700 ease-out"
-                style={{ width: `${Math.round(progress * 100)}%` }}
+                style={{
+                  width: `${Math.round((status === "awaiting" ? 1 : progress) * 100)}%`,
+                }}
               />
             </div>
 
@@ -207,7 +470,7 @@ function Index() {
             )}
 
             <div className="mt-12 flex flex-col items-center gap-6">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap justify-center">
                 {status === "running" ? (
                   <>
                     <button
@@ -217,7 +480,7 @@ function Index() {
                       Pause
                     </button>
                     <button
-                      onClick={end}
+                      onClick={endNowFromRunning}
                       className="px-6 py-4 rounded-full ring-1 ring-border text-foreground hover:bg-foreground/5 transition-colors font-medium"
                     >
                       End session
@@ -226,16 +489,31 @@ function Index() {
                 ) : status === "paused" ? (
                   <>
                     <button
-                      onClick={start}
+                      onClick={resume}
                       className="px-10 py-4 bg-foreground text-background rounded-full font-bold hover:bg-primary transition-all active:scale-95"
                     >
                       Resume
                     </button>
                     <button
-                      onClick={end}
+                      onClick={endNowFromRunning}
                       className="px-6 py-4 rounded-full ring-1 ring-border text-foreground hover:bg-foreground/5 transition-colors font-medium"
                     >
                       End session
+                    </button>
+                  </>
+                ) : status === "awaiting" ? (
+                  <>
+                    <button
+                      onClick={endAndLogPlanned}
+                      className="px-10 py-4 bg-foreground text-background rounded-full font-bold hover:bg-primary transition-all active:scale-95"
+                    >
+                      End &amp; Log
+                    </button>
+                    <button
+                      onClick={() => continueSession()}
+                      className="px-6 py-4 rounded-full ring-1 ring-border text-foreground hover:bg-foreground/5 transition-colors font-medium"
+                    >
+                      Continue +{CONTINUE_EXTENSION_MIN}m
                     </button>
                   </>
                 ) : status === "complete" ? (
@@ -254,6 +532,36 @@ function Index() {
                   </button>
                 )}
               </div>
+
+              {/* Notification permission hint */}
+              {permissionState !== "granted" && permissionState !== "unsupported" && (
+                <div className="flex flex-col items-center gap-2">
+                  <p className="text-[11px] font-mono uppercase tracking-widest text-muted-foreground max-w-sm text-center">
+                    {permissionState === "denied"
+                      ? "Notifications are blocked (this often happens inside embedded previews). Open the app in its own tab and click Enable, or unblock in your browser site settings."
+                      : "Enable browser notifications to be alerted when your timer ends."}
+                  </p>
+                  <button
+                    onClick={ensureNotificationPermission}
+                    className="text-[11px] font-mono uppercase tracking-widest px-3 py-1.5 rounded-full ring-1 ring-border text-foreground hover:bg-foreground/5 transition-colors"
+                  >
+                    Enable notifications
+                  </button>
+                </div>
+              )}
+
+              {/* Awaiting decision banner */}
+              {status === "awaiting" && timerEndedAtRef.current && (
+                <div className="animate-enter bg-primary/10 border border-primary/30 px-5 py-3 rounded-xl max-w-md text-center">
+                  <p className="text-sm font-medium text-foreground">
+                    Focus session complete.
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Timer finished {formatAgo(sinceEndedMs)}. Nothing is logged
+                    until you choose.
+                  </p>
+                </div>
+              )}
 
               {/* Completion / last-session banner */}
               {status === "complete" && lastCompletion ? (
@@ -379,6 +687,49 @@ function Index() {
           </p>
         </div>
       </footer>
+
+      {/* Return-to-tab modal */}
+      {showReturnModal && status === "awaiting" && timerEndedAtRef.current && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-enter">
+          <div className="bg-background border border-border rounded-2xl shadow-2xl max-w-md w-[calc(100%-2rem)] p-6">
+            <h3 className="text-xl font-bold tracking-tight">
+              Your timer finished {formatAgo(sinceEndedMs)}.
+            </h3>
+            <p className="text-sm text-muted-foreground mt-2">
+              What would you like to do?
+            </p>
+            <div className="mt-6 flex flex-col gap-2">
+              <button
+                onClick={endAndLogPlanned}
+                className="w-full px-5 py-3 rounded-xl bg-foreground text-background font-semibold hover:bg-primary transition-colors"
+              >
+                End &amp; Log Then
+                <span className="block text-[11px] font-normal opacity-70 mt-0.5">
+                  Log {intendedMinutes} min — as if you stopped on time.
+                </span>
+              </button>
+              <button
+                onClick={endAndLogNow}
+                className="w-full px-5 py-3 rounded-xl ring-1 ring-border text-foreground hover:bg-foreground/5 transition-colors font-medium"
+              >
+                End &amp; Log Now
+                <span className="block text-[11px] font-normal text-muted-foreground mt-0.5">
+                  Log all elapsed time since start.
+                </span>
+              </button>
+              <button
+                onClick={() => continueSession()}
+                className="w-full px-5 py-3 rounded-xl ring-1 ring-border text-foreground hover:bg-foreground/5 transition-colors font-medium"
+              >
+                Continue +{CONTINUE_EXTENSION_MIN}m
+                <span className="block text-[11px] font-normal text-muted-foreground mt-0.5">
+                  Keep focusing. Decide later.
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
