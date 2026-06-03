@@ -135,15 +135,20 @@ Nothing more.
 Nothing less.
 
 
-
 ## Getting Started
 
-### Prerequisites
+### If you want to use it
+
+Click here: https://hypnosh.github.io/DotDotDone/
+
+### If you want to tinker or contribute to the source
+
+#### Prerequisites
 
 - Node.js (v16 or higher)
 - npm or yarn
 
-### Installation
+#### Installation
 
 1. Clone the repository
 ```bash
@@ -163,14 +168,14 @@ npm run dev
 
 4. Open your browser and navigate to `http://localhost:8080`
 
-### Build for Production
+#### Build for Production
 ```bash
 npm run build
 ```
 
 The production build will be available in the `dist` folder.
 
-### Preview Production Build
+#### Preview Production Build
 ```bash
 npm run preview
 ```
