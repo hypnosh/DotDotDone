@@ -1,11 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  addSession,
-  exportSessionsToCSV,
-  loadSessions,
-  type FocusSession,
-} from "@/lib/focus-storage";
+import { addSession, exportSessionsToCSV, loadSessions, type FocusSession } from "@/lib/focus-storage";
+import { Calendar } from "@/components/ui/calendar";
+
+function dateKey(d: Date | string) {
+  const x = typeof d === "string" ? new Date(d) : d;
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+}
 
 export const Route = createFileRoute("/")({
   component: Index,
@@ -13,6 +14,11 @@ export const Route = createFileRoute("/")({
 
 const DURATIONS = [15, 25, 45, 60];
 const CONTINUE_EXTENSION_MIN = 10;
+
+// TODO: replace with the creator's Threads profile URL
+const THREADS_URL = "https://www.threads.net/";
+// TODO: replace with your Google Apps Script Web App URL (deployed as POST endpoint that writes to a Google Sheet)
+const EMAIL_WEBHOOK_URL = "https://docs.google.com/forms/d/e/1FAIpQLScchW1aLLx1zG8Iji2rSWPPiR6hQ6ju1HqmxT50LUMK4wU4TQ/formResponse";
 
 type Status = "idle" | "running" | "paused" | "awaiting" | "complete";
 
@@ -59,9 +65,7 @@ function beep() {
   if (typeof window === "undefined") return;
   try {
     const AC =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
+      window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AC) return;
     const ctx = new AC();
     const play = (freq: number, start: number, dur: number) => {
@@ -115,21 +119,23 @@ function Index() {
   const [label, setLabel] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [sessions, setSessions] = useState<FocusSession[]>([]);
-  const [lastCompletion, setLastCompletion] = useState<FocusSession | null>(
-    null,
-  );
+  const [lastCompletion, setLastCompletion] = useState<FocusSession | null>(null);
   const [showReturnModal, setShowReturnModal] = useState(false);
+  const [showWhyModal, setShowWhyModal] = useState(false);
+  const [showEmailModal, setShowEmailModal] = useState(false);
+  const [email, setEmail] = useState("");
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [emailSubmitting, setEmailSubmitting] = useState(false);
+  const [emailSubmitted, setEmailSubmitted] = useState(false);
   const [nowTick, setNowTick] = useState(Date.now());
   const [permissionState, setPermissionState] = useState<NotificationPermission | "unsupported">(
-    typeof window !== "undefined" && "Notification" in window
-      ? Notification.permission
-      : "unsupported",
+    typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported",
   );
 
   // Timestamp-based deadline model (robust across pause/continue/awaiting).
-  const startedAtRef = useRef<number | null>(null);     // real start time ms
-  const deadlineAtRef = useRef<number | null>(null);    // when remaining hits 0
-  const timerEndedAtRef = useRef<number | null>(null);  // when status entered awaiting
+  const startedAtRef = useRef<number | null>(null); // real start time ms
+  const deadlineAtRef = useRef<number | null>(null); // when remaining hits 0
+  const timerEndedAtRef = useRef<number | null>(null); // when status entered awaiting
   const pausedRemainingRef = useRef<number | null>(null); // ms remaining when paused
   const notificationRef = useRef<Notification | null>(null);
 
@@ -152,9 +158,7 @@ function Index() {
         setPermissionState(res);
       });
       if (maybePromise && typeof (maybePromise as Promise<NotificationPermission>).then === "function") {
-        (maybePromise as Promise<NotificationPermission>)
-          .then((res) => setPermissionState(res))
-          .catch(() => {});
+        (maybePromise as Promise<NotificationPermission>).then((res) => setPermissionState(res)).catch(() => {});
       }
     } catch {
       setPermissionState(Notification.permission);
@@ -215,10 +219,7 @@ function Index() {
     if (typeof document === "undefined") return;
     const onVis = () => {
       if (document.visibilityState === "visible" && status === "awaiting") {
-        if (
-          timerEndedAtRef.current &&
-          Date.now() - timerEndedAtRef.current > 5000
-        ) {
+        if (timerEndedAtRef.current && Date.now() - timerEndedAtRef.current > 5000) {
           setShowReturnModal(true);
         }
       }
@@ -255,8 +256,7 @@ function Index() {
 
   function endNowFromRunning() {
     // User chose to end before the timer completed.
-    const elapsedMs =
-      startedAtRef.current != null ? Date.now() - startedAtRef.current : 0;
+    const elapsedMs = startedAtRef.current != null ? Date.now() - startedAtRef.current : 0;
     const plannedMs = intendedMinutes * 60_000;
     finalize(elapsedMs, plannedMs, new Date().toISOString());
   }
@@ -272,10 +272,7 @@ function Index() {
         : new Date().toISOString();
       const actualMinutes = Math.max(0, Math.round(actualMs / 60_000));
       const intended = Math.max(1, Math.round(plannedMs / 60_000));
-      const completionPercent =
-        plannedMs > 0
-          ? Math.min(100, Math.round((actualMs / plannedMs) * 100))
-          : 0;
+      const completionPercent = plannedMs > 0 ? Math.min(100, Math.round((actualMs / plannedMs) * 100)) : 0;
 
       const session: FocusSession = {
         id: safeUUID(),
@@ -302,10 +299,7 @@ function Index() {
       // Surface the error instead of silently failing — this is the
       // category of bug that breaks "End Session" with no visible feedback.
       console.error("[DotDotDone] Failed to log session:", err);
-      alert(
-        "Could not log session: " +
-          (err instanceof Error ? err.message : String(err)),
-      );
+      alert("Could not log session: " + (err instanceof Error ? err.message : String(err)));
     }
   }
 
@@ -321,11 +315,7 @@ function Index() {
     const startedAt = startedAtRef.current ?? Date.now();
     const elapsedMs = Math.max(0, Date.now() - startedAt);
     const plannedMs = intendedMinutes * 60_000;
-    finalize(
-      elapsedMs,
-      Math.max(plannedMs, elapsedMs),
-      new Date().toISOString(),
-    );
+    finalize(elapsedMs, Math.max(plannedMs, elapsedMs), new Date().toISOString());
   }
 
   // PRD: Continue — extend the session by N minutes and resume.
@@ -372,22 +362,35 @@ function Index() {
     const ms = (deadlineAtRef.current ?? Date.now()) - nowTick;
     remainingSec = Math.max(0, Math.ceil(ms / 1000));
   }
-  const progress =
-    plannedSeconds > 0
-      ? Math.min(1, Math.max(0, 1 - remainingSec / plannedSeconds))
-      : 0;
+  const progress = plannedSeconds > 0 ? Math.min(1, Math.max(0, 1 - remainingSec / plannedSeconds)) : 0;
 
   const weeklyMinutes = useMemo(() => {
     const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    return sessions
-      .filter((s) => new Date(s.endedAt).getTime() >= cutoff)
-      .reduce((sum, s) => sum + s.actualMinutes, 0);
+    return sessions.filter((s) => new Date(s.endedAt).getTime() >= cutoff).reduce((sum, s) => sum + s.actualMinutes, 0);
   }, [sessions]);
 
+  const [selectedDate, setSelectedDate] = useState<Date | undefined>(undefined);
+
+  const activityDays = useMemo(() => {
+    const s = new Set<string>();
+    for (const sess of sessions) s.add(dateKey(sess.endedAt));
+    return s;
+  }, [sessions]);
+
+  const visibleSessions = useMemo(() => {
+    if (!selectedDate) return sessions;
+    const key = dateKey(selectedDate);
+    return sessions.filter((s) => dateKey(s.endedAt) === key);
+  }, [sessions, selectedDate]);
+
+  const dailySummary = useMemo(() => {
+    if (!selectedDate) return null;
+    const total = visibleSessions.reduce((sum, s) => sum + s.actualMinutes, 0);
+    return { total, count: visibleSessions.length };
+  }, [selectedDate, visibleSessions]);
+
   const lastBanner = lastCompletion ?? sessions[0] ?? null;
-  const sinceEndedMs = timerEndedAtRef.current
-    ? nowTick - timerEndedAtRef.current
-    : 0;
+  const sinceEndedMs = timerEndedAtRef.current ? nowTick - timerEndedAtRef.current : 0;
 
   return (
     <div className="min-h-screen bg-background text-foreground selection:bg-primary/20">
@@ -395,18 +398,13 @@ function Index() {
       <nav className="sticky top-0 z-10 flex items-center justify-between px-6 py-8 bg-background/80 backdrop-blur-md">
         <div className="flex items-center gap-2">
           <div className="size-2 rounded-full bg-primary" />
-          <span className="font-mono text-xs tracking-widest uppercase">
-            DotDotDone
-          </span>
+          <span className="font-mono text-xs tracking-widest uppercase">DotDotDone</span>
         </div>
         <div className="flex gap-8 text-[13px] font-medium">
           <a href="#timer" className="text-foreground">
             Timer
           </a>
-          <a
-            href="#history"
-            className="text-muted-foreground hover:text-foreground transition-colors"
-          >
+          <a href="#history" className="text-muted-foreground hover:text-foreground transition-colors">
             History
           </a>
         </div>
@@ -414,10 +412,7 @@ function Index() {
 
       <main className="max-w-screen-xl mx-auto px-6">
         {/* Timer */}
-        <section
-          id="timer"
-          className="flex flex-col items-center justify-center py-24 md:py-32"
-        >
+        <section id="timer" className="flex flex-col items-center justify-center py-24 md:py-32">
           <div className="animate-enter [animation-delay:100ms] text-center w-full">
             <input
               type="text"
@@ -553,12 +548,9 @@ function Index() {
               {/* Awaiting decision banner */}
               {status === "awaiting" && timerEndedAtRef.current && (
                 <div className="animate-enter bg-primary/10 border border-primary/30 px-5 py-3 rounded-xl max-w-md text-center">
-                  <p className="text-sm font-medium text-foreground">
-                    Focus session complete.
-                  </p>
+                  <p className="text-sm font-medium text-foreground">Focus session complete.</p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Timer finished {formatAgo(sinceEndedMs)}. Nothing is logged
-                    until you choose.
+                    Timer finished {formatAgo(sinceEndedMs)}. Nothing is logged until you choose.
                   </p>
                 </div>
               )}
@@ -590,10 +582,7 @@ function Index() {
         </section>
 
         {/* History */}
-        <section
-          id="history"
-          className="py-24 border-t border-border animate-enter"
-        >
+        <section id="history" className="py-24 border-t border-border animate-enter">
           <div className="flex justify-between items-end mb-12 gap-6 flex-wrap">
             <div>
               <h2 className="text-3xl font-bold tracking-tight">History</h2>
@@ -602,9 +591,7 @@ function Index() {
               </p>
             </div>
             <div className="text-right">
-              <div className="text-4xl font-extrabold tabular-nums">
-                {weeklyMinutes}
-              </div>
+              <div className="text-4xl font-extrabold tabular-nums">{weeklyMinutes}</div>
               <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest mt-1">
                 Weekly minutes
               </div>
@@ -624,67 +611,133 @@ function Index() {
               No sessions yet. Whenever you're ready.
             </div>
           ) : (
-            <div className="grid gap-1">
-              {sessions.map((s) => (
-                <div
-                  key={s.id}
-                  className="group flex flex-wrap items-center justify-between p-4 rounded-xl hover:bg-foreground/[0.02] transition-colors border border-transparent hover:border-border gap-4"
-                >
-                  <div className="flex items-center gap-6">
-                    <span className="font-mono text-xs text-muted-foreground w-16">
-                      {formatDate(s.endedAt)}
-                    </span>
-                    <div>
+            <div className="grid gap-8 md:grid-cols-[auto_1fr] md:gap-12 items-start">
+              {/* Calendar nav */}
+              <div className="flex flex-col gap-3">
+                <Calendar
+                  mode="single"
+                  selected={selectedDate}
+                  onSelect={(d) => {
+                    setSelectedDate(d ?? undefined);
+                    if (typeof document !== "undefined") {
+                      document.getElementById("history-list")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }
+                  }}
+                  modifiers={{
+                    hasActivity: (date) => activityDays.has(dateKey(date)),
+                  }}
+                  modifiersClassNames={{
+                    hasActivity:
+                      "relative after:content-[''] after:absolute after:bottom-1 after:left-1/2 after:-translate-x-1/2 after:size-1 after:rounded-full after:bg-primary",
+                  }}
+                  className="pointer-events-auto rounded-md border border-border p-3"
+                />
+                {selectedDate && (
+                  <button
+                    onClick={() => setSelectedDate(undefined)}
+                    className="text-[11px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors text-left"
+                  >
+                    Clear filter
+                  </button>
+                )}
+              </div>
+
+              {/* List */}
+              <div id="history-list" className="min-w-0">
+                {dailySummary && (
+                  <div className="mb-6 pb-4 border-b border-border flex flex-wrap items-baseline gap-x-6 gap-y-1">
+                    <div className="font-mono text-xs uppercase tracking-widest text-muted-foreground">
+                      {selectedDate!.toLocaleDateString(undefined, {
+                        weekday: "short",
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })}
+                    </div>
+                    <div className="text-sm text-muted-foreground">
+                      <span className="text-foreground font-bold tabular-nums">{dailySummary.total}</span> min ·{" "}
+                      <span className="text-foreground font-bold tabular-nums">{dailySummary.count}</span>{" "}
+                      {dailySummary.count === 1 ? "session" : "sessions"}
+                    </div>
+                  </div>
+                )}
+
+                {visibleSessions.length === 0 ? (
+                  <div className="py-16 text-center text-muted-foreground text-sm">No sessions recorded.</div>
+                ) : (
+                  <div className="grid gap-1">
+                    {visibleSessions.map((s) => (
                       <div
-                        className={`font-bold ${
-                          s.label
-                            ? ""
-                            : "italic text-muted-foreground font-medium"
-                        }`}
+                        key={s.id}
+                        className="group flex flex-wrap items-center justify-between p-4 rounded-xl hover:bg-foreground/[0.02] transition-colors border border-transparent hover:border-border gap-4"
                       >
-                        {s.label || "Untitled session"}
+                        <div className="flex items-center gap-6">
+                          <span className="font-mono text-xs text-muted-foreground w-16">{formatDate(s.endedAt)}</span>
+                          <div>
+                            <div className={`font-bold ${s.label ? "" : "italic text-muted-foreground font-medium"}`}>
+                              {s.label || "Untitled session"}
+                            </div>
+                            <div className="text-xs text-muted-foreground mt-0.5">Planned: {s.intendedMinutes}m</div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-6 sm:gap-12">
+                          <div className="text-right">
+                            <div className="text-sm font-mono tabular-nums">{s.actualMinutes}m</div>
+                            <div className="text-[10px] uppercase text-muted-foreground tracking-tighter">Actual</div>
+                          </div>
+                          <div className="w-24 sm:w-32 h-1 bg-border rounded-full overflow-hidden">
+                            <div className="h-full bg-primary" style={{ width: `${s.completionPercent}%` }} />
+                          </div>
+                          <div className="text-right w-12">
+                            <span className="font-mono text-sm tabular-nums">{s.completionPercent}%</span>
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        Planned: {s.intendedMinutes}m
-                      </div>
-                    </div>
+                    ))}
                   </div>
-                  <div className="flex items-center gap-6 sm:gap-12">
-                    <div className="text-right">
-                      <div className="text-sm font-mono tabular-nums">
-                        {s.actualMinutes}m
-                      </div>
-                      <div className="text-[10px] uppercase text-muted-foreground tracking-tighter">
-                        Actual
-                      </div>
-                    </div>
-                    <div className="w-24 sm:w-32 h-1 bg-border rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-primary"
-                        style={{ width: `${s.completionPercent}%` }}
-                      />
-                    </div>
-                    <div className="text-right w-12">
-                      <span className="font-mono text-sm tabular-nums">
-                        {s.completionPercent}%
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ))}
+                )}
+              </div>
             </div>
           )}
         </section>
       </main>
 
       <footer className="py-12 border-t border-border mt-16">
-        <div className="max-w-screen-xl mx-auto px-6 flex flex-col md:flex-row justify-between items-center gap-4">
-          <p className="text-xs text-muted-foreground font-mono uppercase tracking-widest">
-            Build trust, not streaks.
-          </p>
-          <p className="text-[10px] text-muted-foreground uppercase tracking-widest">
-            DotDotDone · v0.1
-          </p>
+        <div className="max-w-screen-xl mx-auto px-6 flex flex-col gap-6">
+          <nav className="flex flex-col md:flex-row md:justify-center items-center gap-4 md:gap-8 text-sm">
+            <a
+              href={THREADS_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-foreground hover:text-primary transition-colors"
+            >
+              Feedback
+            </a>
+            <span className="hidden md:inline text-muted-foreground/40">|</span>
+            <button
+              type="button"
+              onClick={() => setShowWhyModal(true)}
+              className="text-foreground hover:text-primary transition-colors cursor-pointer"
+            >
+              Why I Built This
+            </button>
+            <span className="hidden md:inline text-muted-foreground/40">|</span>
+            <button
+              type="button"
+              onClick={() => {
+                setEmailSubmitted(false);
+                setEmailError(null);
+                setShowEmailModal(true);
+              }}
+              className="text-foreground hover:text-primary transition-colors cursor-pointer"
+            >
+              Stay Updated
+            </button>
+          </nav>
+          <div className="flex flex-col md:flex-row justify-between items-center gap-2 pt-4 border-t border-border/50">
+            <p className="text-xs text-muted-foreground font-mono uppercase tracking-widest">Build trust, not streaks.</p>
+            <p className="text-[10px] text-muted-foreground uppercase tracking-widest">DotDotDone · v0.1</p>
+          </div>
         </div>
       </footer>
 
@@ -692,12 +745,8 @@ function Index() {
       {showReturnModal && status === "awaiting" && timerEndedAtRef.current && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-enter">
           <div className="bg-background border border-border rounded-2xl shadow-2xl max-w-md w-[calc(100%-2rem)] p-6">
-            <h3 className="text-xl font-bold tracking-tight">
-              Your timer finished {formatAgo(sinceEndedMs)}.
-            </h3>
-            <p className="text-sm text-muted-foreground mt-2">
-              What would you like to do?
-            </p>
+            <h3 className="text-xl font-bold tracking-tight">Your timer finished {formatAgo(sinceEndedMs)}.</h3>
+            <p className="text-sm text-muted-foreground mt-2">What would you like to do?</p>
             <div className="mt-6 flex flex-col gap-2">
               <button
                 onClick={endAndLogPlanned}
@@ -727,6 +776,132 @@ function Index() {
                 </span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Why I Built This modal */}
+      {showWhyModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-enter p-4"
+          onClick={() => setShowWhyModal(false)}
+        >
+          <div
+            className="bg-background border border-border rounded-2xl shadow-2xl max-w-md w-full p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-xl font-bold tracking-tight">Why I Built This</h3>
+            <div className="mt-4 space-y-3 text-sm text-muted-foreground leading-relaxed">
+              <p>
+                I wanted a simple timer and time log that didn't guilt me, punish me, or try to gamify
+                my behaviour.
+              </p>
+              <p>No streaks. No dead trees. No productivity score.</p>
+              <p>
+                Just a timer, a history of where my time went, and enough information to help me
+                understand my day.
+              </p>
+              <p>If it helps you too, that's wonderful.</p>
+            </div>
+            <button
+              onClick={() => setShowWhyModal(false)}
+              className="mt-6 w-full px-5 py-3 rounded-xl bg-foreground text-background font-semibold hover:bg-primary transition-colors"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Stay Updated modal */}
+      {showEmailModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-enter p-4"
+          onClick={() => setShowEmailModal(false)}
+        >
+          <div
+            className="bg-background border border-border rounded-2xl shadow-2xl max-w-md w-full p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {emailSubmitted ? (
+              <>
+                <h3 className="text-xl font-bold tracking-tight">Thank you.</h3>
+                <p className="mt-3 text-sm text-muted-foreground leading-relaxed">
+                  I'll only reach out when there's something genuinely worth sharing.
+                </p>
+                <button
+                  onClick={() => {
+                    setShowEmailModal(false);
+                    setEmail("");
+                  }}
+                  className="mt-6 w-full px-5 py-3 rounded-xl bg-foreground text-background font-semibold hover:bg-primary transition-colors"
+                >
+                  Close
+                </button>
+              </>
+            ) : (
+              <>
+                <h3 className="text-xl font-bold tracking-tight">Stay Updated</h3>
+                <p className="mt-3 text-sm text-muted-foreground leading-relaxed">
+                  Leave your email if you'd like occasional updates.
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground leading-relaxed">
+                  This is not an account. You do not need an email to use the app. No spam.
+                </p>
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    setEmailError(null);
+                    const value = email.trim();
+                    if (!value || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+                      setEmailError("Please enter a valid email address.");
+                      return;
+                    }
+                    if (!EMAIL_WEBHOOK_URL) {
+                      setEmailError("Email signup isn't configured yet.");
+                      return;
+                    }
+                    setEmailSubmitting(true);
+                    try {
+                      const formData = new FormData();
+                      formData.append("submissionTimestamp", new Date().toISOString());
+                      formData.append("entry.493002001", value);
+                      await fetch(EMAIL_WEBHOOK_URL, {
+                        method: "POST",
+                        mode: "no-cors",
+                        body: formData,
+                      });
+                      setEmailSubmitted(true);
+                    } catch (err) {
+                      console.error(err);
+                      setEmailError("Something went wrong. Please try again.");
+                    } finally {
+                      setEmailSubmitting(false);
+                    }
+                  }}
+                  className="mt-5 flex flex-col gap-3"
+                >
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    autoFocus
+                    className="w-full px-4 py-3 rounded-xl bg-background border border-border focus:outline-none focus:ring-2 focus:ring-primary/40 text-sm"
+                  />
+                  {emailError && (
+                    <p className="text-xs text-destructive">{emailError}</p>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={emailSubmitting}
+                    className="w-full px-5 py-3 rounded-xl bg-foreground text-background font-semibold hover:bg-primary transition-colors disabled:opacity-60"
+                  >
+                    {emailSubmitting ? "Submitting…" : "Submit"}
+                  </button>
+                </form>
+              </>
+            )}
           </div>
         </div>
       )}
