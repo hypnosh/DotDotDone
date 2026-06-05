@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { addSession, exportSessionsToCSV, loadSessions, type FocusSession } from "@/lib/focus-storage";
 import { Calendar } from "@/components/ui/calendar";
+import { track } from "@/lib/analytics";
 
 function dateKey(d: Date | string) {
   const x = typeof d === "string" ? new Date(d) : d;
@@ -239,19 +240,26 @@ function Index() {
     timerEndedAtRef.current = null;
     setLastCompletion(null);
     setStatus("running");
+    track("timer_started", { timer_duration_minutes: intendedMinutes });
   }
 
   function pause() {
     if (deadlineAtRef.current == null) return;
-    pausedRemainingRef.current = Math.max(0, deadlineAtRef.current - Date.now());
+    const remainingMs = Math.max(0, deadlineAtRef.current - Date.now());
+    pausedRemainingRef.current = remainingMs;
     setStatus("paused");
+    const elapsedMin = Math.max(0, Math.round((intendedMinutes * 60_000 - remainingMs) / 60_000));
+    track("pause_clicked", { elapsed_minutes: elapsedMin });
   }
 
   function resume() {
     if (pausedRemainingRef.current == null) return;
-    deadlineAtRef.current = Date.now() + pausedRemainingRef.current;
+    const remainingMs = pausedRemainingRef.current;
+    deadlineAtRef.current = Date.now() + remainingMs;
     pausedRemainingRef.current = null;
     setStatus("running");
+    const elapsedMin = Math.max(0, Math.round((intendedMinutes * 60_000 - remainingMs) / 60_000));
+    track("resume_clicked", { elapsed_minutes: elapsedMin });
   }
 
   function endNowFromRunning() {
@@ -287,6 +295,10 @@ function Index() {
       const all = addSession(session);
       setSessions(all);
       setLastCompletion(session);
+      track("log_and_end_clicked", {
+        duration_minutes: actualMinutes,
+        has_description: Boolean(session.label),
+      });
 
       // Reset transient state
       startedAtRef.current = null;
@@ -404,7 +416,11 @@ function Index() {
           <a href="#timer" className="text-foreground">
             Timer
           </a>
-          <a href="#history" className="text-muted-foreground hover:text-foreground transition-colors">
+          <a
+            href="#history"
+            onClick={() => track("history_opened")}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+          >
             History
           </a>
         </div>
@@ -597,7 +613,10 @@ function Index() {
               </div>
               {sessions.length > 0 && (
                 <button
-                  onClick={() => exportSessionsToCSV(sessions)}
+                  onClick={() => {
+                    track("export_clicked", { entry_count: sessions.length });
+                    exportSessionsToCSV(sessions);
+                  }}
                   className="mt-3 text-[11px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors"
                 >
                   Export CSV
@@ -709,6 +728,7 @@ function Index() {
               href={THREADS_URL}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={() => track("feedback_clicked")}
               className="text-foreground hover:text-primary transition-colors"
             >
               Feedback
@@ -716,7 +736,10 @@ function Index() {
             <span className="hidden md:inline text-muted-foreground/40">|</span>
             <button
               type="button"
-              onClick={() => setShowWhyModal(true)}
+              onClick={() => {
+                track("why_i_built_this_opened");
+                setShowWhyModal(true);
+              }}
               className="text-foreground hover:text-primary transition-colors cursor-pointer"
             >
               Why I Built This
@@ -739,6 +762,7 @@ function Index() {
               href="https://www.ilovecreatingthings.com/"
               target="_blank"
               rel="noopener noreferrer"
+              onClick={() => track("blog_clicked")}
               className="text-xs text-muted-foreground hover:text-primary transition-colors"
             >
               Made by Amit Sharma
@@ -882,6 +906,7 @@ function Index() {
                         body: formData,
                       });
                       setEmailSubmitted(true);
+                      track("email_signup_submitted");
                     } catch (err) {
                       console.error(err);
                       setEmailError("Something went wrong. Please try again.");

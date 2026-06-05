@@ -133,7 +133,7 @@ test.describe("Session history", () => {
     await goto(page);
     const input = page.locator("input[type=text], textarea, [placeholder]").first();
     await input.fill("Persist test");
-    await page
+    await pagesudo npx playwright install-deps 
       .locator("button")
       .filter({ hasText: /start|begin|go/i })
       .first()
