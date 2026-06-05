@@ -16,9 +16,9 @@ const DURATIONS = [15, 25, 45, 60];
 const CONTINUE_EXTENSION_MIN = 10;
 
 // TODO: replace with the creator's Threads profile URL
-const THREADS_URL = "https://www.threads.com/@papajukebox";
+const THREADS_URL = "https://www.threads.net/";
 // TODO: replace with your Google Apps Script Web App URL (deployed as POST endpoint that writes to a Google Sheet)
-const EMAIL_WEBHOOK_URL = "https://docs.google.com/forms/d/e/1FAIpQLScchW1aLLx1zG8Iji2rSWPPiR6hQ6ju1HqmxT50LUMK4wU4TQ/formResponse";
+const EMAIL_WEBHOOK_URL = "";
 
 type Status = "idle" | "running" | "paused" | "awaiting" | "complete";
 
@@ -734,6 +734,16 @@ function Index() {
               Stay Updated
             </button>
           </nav>
+          <div className="text-center">
+            <a
+              href="https://www.ilovecreatingthings.com/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-muted-foreground hover:text-primary transition-colors"
+            >
+              Made by Amit Sharma
+            </a>
+          </div>
           <div className="flex flex-col md:flex-row justify-between items-center gap-2 pt-4 border-t border-border/50">
             <p className="text-xs text-muted-foreground font-mono uppercase tracking-widest">Build trust, not streaks.</p>
             <p className="text-[10px] text-muted-foreground uppercase tracking-widest">DotDotDone · v0.1</p>
@@ -864,8 +874,8 @@ function Index() {
                     setEmailSubmitting(true);
                     try {
                       const formData = new FormData();
-                      formData.append("submissionTimestamp", new Date().toISOString());
-                      formData.append("entry.493002001", value);
+                      formData.append("timestamp", new Date().toISOString());
+                      formData.append("email", value);
                       await fetch(EMAIL_WEBHOOK_URL, {
                         method: "POST",
                         mode: "no-cors",
