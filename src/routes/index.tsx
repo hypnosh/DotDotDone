@@ -17,13 +17,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -48,10 +42,9 @@ export const Route = createFileRoute("/")({
 const DURATIONS = [15, 25, 45, 60];
 const CONTINUE_EXTENSION_MIN = 10;
 
-// TODO: replace with the creator's Threads profile URL
 const THREADS_URL = "https://www.threads.com/@papajukebox";
-// TODO: replace with your Google Apps Script Web App URL (deployed as POST endpoint that writes to a Google Sheet)
-const EMAIL_WEBHOOK_URL = "https://docs.google.com/forms/d/e/1FAIpQLScchW1aLLx1zG8Iji2rSWPPiR6hQ6ju1HqmxT50LUMK4wU4TQ/formResponse";
+const EMAIL_WEBHOOK_URL =
+  "https://docs.google.com/forms/d/e/1FAIpQLScchW1aLLx1zG8Iji2rSWPPiR6hQ6ju1HqmxT50LUMK4wU4TQ/formResponse";
 
 type Status = "idle" | "running" | "paused" | "awaiting" | "complete";
 
@@ -521,7 +514,6 @@ function Index() {
     track("entry_deleted");
   }
 
-
   return (
     <div className="min-h-screen bg-background text-foreground selection:bg-primary/20">
       {/* Nav */}
@@ -902,7 +894,9 @@ function Index() {
             </a>
           </div>
           <div className="flex flex-col md:flex-row justify-between items-center gap-2 pt-4 border-t border-border/50">
-            <p className="text-xs text-muted-foreground font-mono uppercase tracking-widest">Build trust, not streaks.</p>
+            <p className="text-xs text-muted-foreground font-mono uppercase tracking-widest">
+              Build trust, not streaks.
+            </p>
             <p className="text-[10px] text-muted-foreground uppercase tracking-widest">DotDotDone · v0.1</p>
           </div>
         </div>
@@ -960,14 +954,10 @@ function Index() {
             <h3 className="text-xl font-bold tracking-tight">Why I Built This</h3>
             <div className="mt-4 space-y-3 text-sm text-muted-foreground leading-relaxed">
               <p>
-                I wanted a simple timer and time log that didn't guilt me, punish me, or try to gamify
-                my behaviour.
+                I wanted a simple timer and time log that didn't guilt me, punish me, or try to gamify my behaviour.
               </p>
               <p>No streaks. No dead trees. No productivity score.</p>
-              <p>
-                Just a timer, a history of where my time went, and enough information to help me
-                understand my day.
-              </p>
+              <p>Just a timer, a history of where my time went, and enough information to help me understand my day.</p>
               <p>If it helps you too, that's wonderful.</p>
             </div>
             <button
@@ -1031,8 +1021,8 @@ function Index() {
                     setEmailSubmitting(true);
                     try {
                       const formData = new FormData();
-                      formData.append("timestamp", new Date().toISOString());
-                      formData.append("email", value);
+                      formData.append("submissionTimestamp", new Date().toISOString());
+                      formData.append("entry.493002001", value);
                       await fetch(EMAIL_WEBHOOK_URL, {
                         method: "POST",
                         mode: "no-cors",
@@ -1057,9 +1047,7 @@ function Index() {
                     autoFocus
                     className="w-full px-4 py-3 rounded-xl bg-background border border-border focus:outline-none focus:ring-2 focus:ring-primary/40 text-sm"
                   />
-                  {emailError && (
-                    <p className="text-xs text-destructive">{emailError}</p>
-                  )}
+                  {emailError && <p className="text-xs text-destructive">{emailError}</p>}
                   <button
                     type="submit"
                     disabled={emailSubmitting}
@@ -1081,9 +1069,7 @@ function Index() {
             <DialogTitle>Edit entry</DialogTitle>
           </DialogHeader>
           <div className="space-y-2">
-            <label className="text-xs font-mono uppercase tracking-widest text-muted-foreground">
-              Description
-            </label>
+            <label className="text-xs font-mono uppercase tracking-widest text-muted-foreground">Description</label>
             <input
               type="text"
               value={editLabel}
