@@ -49,9 +49,9 @@ const DURATIONS = [15, 25, 45, 60];
 const CONTINUE_EXTENSION_MIN = 10;
 
 // TODO: replace with the creator's Threads profile URL
-const THREADS_URL = "https://www.threads.net/";
+const THREADS_URL = "https://www.threads.com/@papajukebox";
 // TODO: replace with your Google Apps Script Web App URL (deployed as POST endpoint that writes to a Google Sheet)
-const EMAIL_WEBHOOK_URL = "";
+const EMAIL_WEBHOOK_URL = "https://docs.google.com/forms/d/e/1FAIpQLScchW1aLLx1zG8Iji2rSWPPiR6hQ6ju1HqmxT50LUMK4wU4TQ/formResponse";
 
 type Status = "idle" | "running" | "paused" | "awaiting" | "complete";
 
