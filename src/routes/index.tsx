@@ -1,8 +1,40 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { addSession, exportSessionsToCSV, loadSessions, type FocusSession } from "@/lib/focus-storage";
+import {
+  addSession,
+  deleteSession as deleteSessionStorage,
+  exportSessionsToCSV,
+  loadSessions,
+  updateSession,
+  type FocusSession,
+} from "@/lib/focus-storage";
 import { Calendar } from "@/components/ui/calendar";
 import { track } from "@/lib/analytics";
+import { toast } from "sonner";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { MoreVertical } from "lucide-react";
 
 function dateKey(d: Date | string) {
   const x = typeof d === "string" ? new Date(d) : d;
@@ -90,29 +122,20 @@ function beep() {
   }
 }
 
-let titleFlashTimer: ReturnType<typeof setInterval> | null = null;
-function startTitleFlash() {
-  if (typeof document === "undefined") return;
-  stopTitleFlash();
-  const original = document.title;
-  let on = true;
-  titleFlashTimer = setInterval(() => {
-    document.title = on ? "⏰ Timer complete — DotDotDone" : original;
-    on = !on;
-  }, 900);
-  // Restore on first focus
-  const restore = () => {
-    stopTitleFlash();
-    document.title = original;
-    window.removeEventListener("focus", restore);
-  };
-  window.addEventListener("focus", restore);
+const APP_TITLE = "DotDotDone";
+const TITLE_LABEL_MAX = 25;
+
+function formatTitleClock(totalSeconds: number) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return h > 0 ? `${pad(h)}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
 }
-function stopTitleFlash() {
-  if (titleFlashTimer) {
-    clearInterval(titleFlashTimer);
-    titleFlashTimer = null;
-  }
+
+function truncateLabel(label: string) {
+  return label.length > TITLE_LABEL_MAX ? label.slice(0, TITLE_LABEL_MAX) + "…" : label;
 }
 
 function Index() {
@@ -132,6 +155,9 @@ function Index() {
   const [permissionState, setPermissionState] = useState<NotificationPermission | "unsupported">(
     typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported",
   );
+  const [editing, setEditing] = useState<FocusSession | null>(null);
+  const [editLabel, setEditLabel] = useState("");
+  const [deleting, setDeleting] = useState<FocusSession | null>(null);
 
   // Timestamp-based deadline model (robust across pause/continue/awaiting).
   const startedAtRef = useRef<number | null>(null); // real start time ms
@@ -179,9 +205,8 @@ function Index() {
   }, []);
 
   const fireCompletionSignals = useCallback(() => {
-    // Always: audible + title flash (work in any tab state where JS runs).
+    // Always: audible. Title flash is handled by an effect tied to status.
     beep();
-    startTitleFlash();
     // Optional: system notification, if permission granted.
     if (typeof window !== "undefined" && "Notification" in window) {
       if (Notification.permission === "granted") {
@@ -271,7 +296,7 @@ function Index() {
 
   function finalize(actualMs: number, plannedMs: number, endedAtIso: string) {
     try {
-      stopTitleFlash();
+      // title cleared by effect
       notificationRef.current?.close();
       notificationRef.current = null;
 
@@ -306,7 +331,7 @@ function Index() {
       pausedRemainingRef.current = null;
       timerEndedAtRef.current = null;
       setShowReturnModal(false);
-      setStatus("complete");
+      setStatus("idle");
     } catch (err) {
       // Surface the error instead of silently failing — this is the
       // category of bug that breaks "End Session" with no visible feedback.
@@ -332,7 +357,7 @@ function Index() {
 
   // PRD: Continue — extend the session by N minutes and resume.
   function continueSession(extensionMin = CONTINUE_EXTENSION_MIN) {
-    stopTitleFlash();
+    // title cleared by effect
     notificationRef.current?.close();
     notificationRef.current = null;
     setShowReturnModal(false);
@@ -348,7 +373,7 @@ function Index() {
   }
 
   function reset() {
-    stopTitleFlash();
+    // title cleared by effect
     notificationRef.current?.close();
     notificationRef.current = null;
     startedAtRef.current = null;
@@ -372,7 +397,7 @@ function Index() {
   } else {
     // running
     const ms = (deadlineAtRef.current ?? Date.now()) - nowTick;
-    remainingSec = Math.max(0, Math.ceil(ms / 1000));
+    remainingSec = Math.min(plannedSeconds, Math.max(0, Math.ceil(ms / 1000)));
   }
   const progress = plannedSeconds > 0 ? Math.min(1, Math.max(0, 1 - remainingSec / plannedSeconds)) : 0;
 
@@ -403,6 +428,97 @@ function Index() {
 
   const lastBanner = lastCompletion ?? sessions[0] ?? null;
   const sinceEndedMs = timerEndedAtRef.current ? nowTick - timerEndedAtRef.current : 0;
+
+  // Fire timer_title_enabled once on mount.
+  useEffect(() => {
+    track("timer_title_enabled");
+  }, []);
+
+  // --- Browser tab title management ---
+  // Running/paused: "MM:SS • label" (or "(P)MM:SS • label")
+  // Awaiting + tab hidden: alternate "❗ Timer Complete" / "DotDotDone" every 2s
+  // Otherwise: "DotDotDone"
+  const elapsedSec = Math.max(0, plannedSeconds - remainingSec);
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+
+    if (status === "running" || status === "paused") {
+      const clock = formatTitleClock(remainingSec);
+      const trimmed = label.trim();
+      const suffix = trimmed ? ` • ${truncateLabel(trimmed)}` : "";
+      const prefix = status === "paused" ? "(P)" : "";
+      document.title = `${prefix}${clock}${suffix}`;
+      return;
+    }
+
+    if (status === "awaiting") {
+      const wasHidden = document.visibilityState === "hidden";
+      if (!wasHidden) {
+        document.title = APP_TITLE;
+        return;
+      }
+      track("completion_attention_started");
+      let showAlert = true;
+      document.title = "❗ Timer Complete";
+      const interval = window.setInterval(() => {
+        showAlert = !showAlert;
+        document.title = showAlert ? "❗ Timer Complete" : APP_TITLE;
+      }, 2000);
+      const clear = () => {
+        if (document.visibilityState === "visible") {
+          window.clearInterval(interval);
+          document.title = APP_TITLE;
+          document.removeEventListener("visibilitychange", clear);
+          track("completion_attention_cleared");
+        }
+      };
+      document.addEventListener("visibilitychange", clear);
+      return () => {
+        window.clearInterval(interval);
+        document.removeEventListener("visibilitychange", clear);
+        document.title = APP_TITLE;
+      };
+    }
+
+    document.title = APP_TITLE;
+  }, [status, elapsedSec, label]);
+
+  // Track timer_completed (and background variant) once when entering awaiting.
+  useEffect(() => {
+    if (status !== "awaiting") return;
+    track("timer_completed", { duration_minutes: intendedMinutes });
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      track("timer_completed_in_background", { duration_minutes: intendedMinutes });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
+
+  function openEdit(s: FocusSession) {
+    track("entry_edit_clicked");
+    setEditing(s);
+    setEditLabel(s.label ?? "");
+  }
+
+  function saveEdit() {
+    if (!editing) return;
+    const next = editLabel.trim();
+    const all = updateSession(editing.id, { label: next || undefined });
+    setSessions(all);
+    setEditing(null);
+    toast("Entry updated");
+    track("entry_updated");
+  }
+
+  function confirmDelete() {
+    if (!deleting) return;
+    const all = deleteSessionStorage(deleting.id);
+    setSessions(all);
+    if (lastCompletion?.id === deleting.id) setLastCompletion(null);
+    setDeleting(null);
+    toast("Entry deleted");
+    track("entry_deleted");
+  }
+
 
   return (
     <div className="min-h-screen bg-background text-foreground selection:bg-primary/20">
@@ -527,13 +643,6 @@ function Index() {
                       Continue +{CONTINUE_EXTENSION_MIN}m
                     </button>
                   </>
-                ) : status === "complete" ? (
-                  <button
-                    onClick={reset}
-                    className="px-10 py-4 bg-foreground text-background rounded-full font-bold hover:bg-primary transition-all active:scale-95"
-                  >
-                    Start another
-                  </button>
                 ) : (
                   <button
                     onClick={start}
@@ -699,7 +808,7 @@ function Index() {
                             <div className="text-xs text-muted-foreground mt-0.5">Planned: {s.intendedMinutes}m</div>
                           </div>
                         </div>
-                        <div className="flex items-center gap-6 sm:gap-12">
+                        <div className="flex items-center gap-4 sm:gap-8">
                           <div className="text-right">
                             <div className="text-sm font-mono tabular-nums">{s.actualMinutes}m</div>
                             <div className="text-[10px] uppercase text-muted-foreground tracking-tighter">Actual</div>
@@ -710,6 +819,26 @@ function Index() {
                           <div className="text-right w-12">
                             <span className="font-mono text-sm tabular-nums">{s.completionPercent}%</span>
                           </div>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger
+                              aria-label="Entry actions"
+                              className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-foreground/5 transition-colors cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            >
+                              <MoreVertical className="size-4" />
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={() => openEdit(s)}>Edit</DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={() => {
+                                  track("entry_delete_clicked");
+                                  setDeleting(s);
+                                }}
+                                className="text-destructive focus:text-destructive"
+                              >
+                                Delete
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </div>
                       </div>
                     ))}
@@ -940,6 +1069,63 @@ function Index() {
           </div>
         </div>
       )}
+
+      {/* Edit entry modal */}
+      <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit entry</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <label className="text-xs font-mono uppercase tracking-widest text-muted-foreground">
+              Description
+            </label>
+            <input
+              type="text"
+              value={editLabel}
+              onChange={(e) => setEditLabel(e.target.value)}
+              placeholder="Untitled session"
+              className="w-full px-4 py-3 rounded-xl bg-background border border-border focus:outline-none focus:ring-2 focus:ring-primary/40 text-sm"
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <button
+              type="button"
+              onClick={() => setEditing(null)}
+              className="px-4 py-2 rounded-xl ring-1 ring-border text-foreground hover:bg-foreground/5 transition-colors text-sm font-medium"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={saveEdit}
+              className="px-4 py-2 rounded-xl bg-foreground text-background font-semibold hover:bg-primary transition-colors text-sm"
+            >
+              Save
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirmation */}
+      <AlertDialog open={!!deleting} onOpenChange={(o) => !o && setDeleting(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete entry?</AlertDialogTitle>
+            <AlertDialogDescription>This action cannot be undone.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

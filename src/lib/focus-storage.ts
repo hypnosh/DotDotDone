@@ -34,6 +34,18 @@ export function addSession(session: FocusSession) {
   return all;
 }
 
+export function updateSession(id: string, patch: Partial<Pick<FocusSession, "label">>) {
+  const all = loadSessions().map((s) => (s.id === id ? { ...s, ...patch } : s));
+  saveSessions(all);
+  return all;
+}
+
+export function deleteSession(id: string) {
+  const all = loadSessions().filter((s) => s.id !== id);
+  saveSessions(all);
+  return all;
+}
+
 function escapeCsvCell(value: string | number | undefined): string {
   const str = value == null ? "" : String(value);
   if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r")) {
