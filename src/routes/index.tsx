@@ -170,11 +170,13 @@ function Index() {
     setSessions(loadSessions());
   }, []);
 
-  // Keep ticking once per second so derived UI (remaining, "ago") updates.
+  // Keep ticking so derived UI (remaining, "ago") updates — only while a timer is active.
+  // Ticking during idle caused re-renders that made the history Calendar drop click events.
   useEffect(() => {
+    if (status === "idle" || status === "complete") return;
     const id = window.setInterval(() => setNowTick(Date.now()), 250);
     return () => window.clearInterval(id);
-  }, []);
+  }, [status]);
 
   const ensureNotificationPermission = useCallback(() => {
     if (typeof window === "undefined" || !("Notification" in window)) return;
@@ -716,9 +718,11 @@ function Index() {
               </p>
             </div>
             <div className="text-right">
-              <div className="text-4xl font-extrabold tabular-nums">{weeklyMinutes}</div>
+              <div className="text-4xl font-extrabold tabular-nums">
+                {selectedDate ? (dailySummary?.total ?? 0) : weeklyMinutes}
+              </div>
               <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest mt-1">
-                Weekly minutes
+                {selectedDate ? "Daily minutes" : "Weekly minutes"}
               </div>
               {sessions.length > 0 && (
                 <button
