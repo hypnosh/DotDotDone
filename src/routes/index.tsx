@@ -484,7 +484,7 @@ function Index() {
     if (typeof document === "undefined") return;
     if (status !== "idle" && status !== "complete") return;
 
-    const IDLE_TICKER_DELAY_MS = 2 * 60 * 1000;
+    const IDLE_TICKER_DELAY_MS = 5 * 60 * 1000;
     const TICKER_MESSAGE = "Working on something?   ";
     const TICKER_STEP_MS = 400;
 
@@ -608,6 +608,12 @@ function Index() {
               type="text"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && status === "idle") {
+                  e.preventDefault();
+                  start();
+                }
+              }}
               placeholder="What are we focusing on?"
               disabled={status === "running" || status === "awaiting"}
               className="bg-transparent border-none text-center text-muted-foreground placeholder:text-muted-foreground/40 focus:outline-none text-xl font-normal w-full max-w-md mb-8 disabled:opacity-60"
