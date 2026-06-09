@@ -478,6 +478,70 @@ function Index() {
     document.title = APP_TITLE;
   }, [status, elapsedSec, label]);
 
+  // Idle ticker: when no timer is running and the tab has been hidden for
+  // IDLE_TICKER_DELAY_MS, scroll a gentle reminder through the tab title.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (status !== "idle" && status !== "complete") return;
+
+    const IDLE_TICKER_DELAY_MS = 2 * 60 * 1000;
+    const TICKER_MESSAGE = "Working on something?   ";
+    const TICKER_STEP_MS = 400;
+
+    let activateTimeout: number | null = null;
+    let tickerInterval: number | null = null;
+    let offset = 0;
+
+    const stopTicker = () => {
+      if (tickerInterval != null) {
+        window.clearInterval(tickerInterval);
+        tickerInterval = null;
+      }
+      document.title = APP_TITLE;
+    };
+
+    const startTicker = () => {
+      if (tickerInterval != null) return;
+      offset = 0;
+      const tick = () => {
+        document.title = TICKER_MESSAGE.slice(offset) + TICKER_MESSAGE.slice(0, offset);
+        offset = (offset + 3) % TICKER_MESSAGE.length;
+      };
+      tick();
+      tickerInterval = window.setInterval(tick, TICKER_STEP_MS);
+    };
+
+    const scheduleActivation = () => {
+      if (activateTimeout != null) window.clearTimeout(activateTimeout);
+      activateTimeout = window.setTimeout(startTicker, IDLE_TICKER_DELAY_MS);
+    };
+
+    const cancelActivation = () => {
+      if (activateTimeout != null) {
+        window.clearTimeout(activateTimeout);
+        activateTimeout = null;
+      }
+    };
+
+    const onVis = () => {
+      if (document.visibilityState === "hidden") {
+        scheduleActivation();
+      } else {
+        cancelActivation();
+        stopTicker();
+      }
+    };
+
+    if (document.visibilityState === "hidden") scheduleActivation();
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      cancelActivation();
+      stopTicker();
+    };
+  }, [status]);
+
   // Track timer_completed (and background variant) once when entering awaiting.
   useEffect(() => {
     if (status !== "awaiting") return;
