@@ -7,7 +7,7 @@ import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 // Plain Vite + React SPA (no SSR) so the build can be hosted on GitHub Pages.
 // `base` matches the GitHub Pages subpath: https://<user>.github.io/DotDotDone/
 export default defineConfig({
-  base: "/DotDotDone/",
+  base: "/",
   plugins: [
     TanStackRouterVite({ target: "react", autoCodeSplitting: true }),
     react(),

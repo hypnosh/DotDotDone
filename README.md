@@ -139,7 +139,7 @@ Nothing less.
 
 ### If you want to use it
 
-Click here: https://hypnosh.github.io/DotDotDone/
+Click here: https://dotdotdone.recaptured.in/
 
 ### If you want to tinker or contribute to the source
 

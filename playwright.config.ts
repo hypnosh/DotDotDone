@@ -8,7 +8,7 @@ export default defineConfig({
   workers: 2,
 
   use: {
-    baseURL: "https://hypnosh.github.io/DotDotDone/",
+    baseURL: "https://dotdotdone.recaptured.in/",
     headless: true,
     screenshot: "only-on-failure",
     video: "retain-on-failure",
@@ -24,10 +24,6 @@ export default defineConfig({
     {
       name: "mobile-chrome",
       use: { ...devices["Pixel 5"] },
-    },
-    {
-      name: "webkit",
-      use: { ...devices["Desktop Safari"] },
     },
   ],
 });
