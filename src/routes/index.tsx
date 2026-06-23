@@ -151,6 +151,9 @@ function Index() {
   const [editing, setEditing] = useState<FocusSession | null>(null);
   const [editLabel, setEditLabel] = useState("");
   const [deleting, setDeleting] = useState<FocusSession | null>(null);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
+  const [highlightedSuggestion, setHighlightedSuggestion] = useState(-1);
+  const labelInputWrapperRef = useRef<HTMLDivElement | null>(null);
 
   // Timestamp-based deadline model (robust across pause/continue/awaiting).
   const startedAtRef = useRef<number | null>(null); // real start time ms
@@ -424,6 +427,36 @@ function Index() {
   const lastBanner = lastCompletion ?? sessions[0] ?? null;
   const sinceEndedMs = timerEndedAtRef.current ? nowTick - timerEndedAtRef.current : 0;
 
+  // Description suggestions: dedup most-recent first, filter by current input.
+  const labelSuggestions = useMemo(() => {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const s of sessions) {
+      const desc = s.label?.trim();
+      if (!desc) continue;
+      const key = desc.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(desc);
+    }
+    const q = label.trim().toLowerCase();
+    const filtered = q ? result.filter((d) => d.toLowerCase().includes(q)) : result;
+    return filtered.slice(0, 10);
+  }, [sessions, label]);
+
+  // Close suggestions on outside click.
+  useEffect(() => {
+    if (!suggestionsOpen) return;
+    function onDown(e: MouseEvent) {
+      if (!labelInputWrapperRef.current?.contains(e.target as Node)) {
+        setSuggestionsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [suggestionsOpen]);
+
+
   // Fire timer_title_enabled once on mount.
   useEffect(() => {
     track("timer_title_enabled");
@@ -604,20 +637,86 @@ function Index() {
         {/* Timer */}
         <section id="timer" className="flex flex-col items-center justify-center py-24 md:py-32">
           <div className="animate-enter [animation-delay:100ms] text-center w-full">
-            <input
-              type="text"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && status === "idle") {
-                  e.preventDefault();
-                  start();
-                }
-              }}
-              placeholder="What are we focusing on?"
-              disabled={status === "running" || status === "awaiting"}
-              className="bg-transparent border-none text-center text-muted-foreground placeholder:text-muted-foreground/40 focus:outline-none text-xl font-normal w-full max-w-md mb-8 disabled:opacity-60"
-            />
+            <div ref={labelInputWrapperRef} className="relative mx-auto w-full max-w-md mb-8">
+              <input
+                type="text"
+                value={label}
+                onChange={(e) => {
+                  setLabel(e.target.value);
+                  setHighlightedSuggestion(-1);
+                  if (status === "idle") setSuggestionsOpen(true);
+                }}
+                onFocus={() => {
+                  if (status === "idle") setSuggestionsOpen(true);
+                }}
+                onKeyDown={(e) => {
+                  if (status !== "idle") return;
+                  if (suggestionsOpen && labelSuggestions.length > 0) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setHighlightedSuggestion((i) => (i + 1) % labelSuggestions.length);
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setHighlightedSuggestion((i) =>
+                        i <= 0 ? labelSuggestions.length - 1 : i - 1,
+                      );
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      setSuggestionsOpen(false);
+                      setHighlightedSuggestion(-1);
+                      return;
+                    }
+                    if (e.key === "Enter" && highlightedSuggestion >= 0) {
+                      e.preventDefault();
+                      setLabel(labelSuggestions[highlightedSuggestion]);
+                      setSuggestionsOpen(false);
+                      setHighlightedSuggestion(-1);
+                      return;
+                    }
+                  }
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    setSuggestionsOpen(false);
+                    start();
+                  }
+                }}
+                placeholder="What are we focusing on?"
+                disabled={status === "running" || status === "awaiting"}
+                className="bg-transparent border-none text-center text-muted-foreground placeholder:text-muted-foreground/40 focus:outline-none text-xl font-normal w-full disabled:opacity-60"
+              />
+              {status === "idle" && suggestionsOpen && labelSuggestions.length > 0 && (
+                <ul
+                  role="listbox"
+                  className="absolute left-1/2 -translate-x-1/2 top-full mt-2 w-full max-w-md bg-popover border border-border rounded-md shadow-lg overflow-hidden z-20 text-left"
+                >
+                  {labelSuggestions.map((s, i) => (
+                    <li
+                      key={s}
+                      role="option"
+                      aria-selected={i === highlightedSuggestion}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setLabel(s);
+                        setSuggestionsOpen(false);
+                        setHighlightedSuggestion(-1);
+                      }}
+                      onMouseEnter={() => setHighlightedSuggestion(i)}
+                      className={`px-4 py-2 text-sm cursor-pointer truncate ${
+                        i === highlightedSuggestion
+                          ? "bg-accent text-accent-foreground"
+                          : "text-foreground"
+                      }`}
+                    >
+                      {s}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
 
             <div className="relative flex flex-col items-center">
               <div className="text-[110px] sm:text-[140px] md:text-[200px] font-extrabold tracking-tighter leading-none select-none tabular-nums">
